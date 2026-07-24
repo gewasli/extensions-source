@@ -1,5 +1,3 @@
-package eu.kanade.tachiyomi.extension.zh.wnacg
-
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.preference.ListPreference
