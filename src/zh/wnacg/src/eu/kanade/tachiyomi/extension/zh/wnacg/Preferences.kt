@@ -66,7 +66,6 @@ class UpdateUrlInterceptor(private val preferences: SharedPreferences) : Interce
     private var lastUpdateTime = 0L
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        // ✅ 每次请求实时读取最新域名，不再缓存
         val currentBase = preferences.baseUrl
         val request = chain.request()
 
@@ -77,27 +76,22 @@ class UpdateUrlInterceptor(private val preferences: SharedPreferences) : Interce
         var response: Response? = null
         try {
             response = chain.proceed(request)
-            // 正常访问直接返回
             if (response.isSuccessful && response.header("Server") != "Parking/1.0") {
                 return response
             }
-            // 停放页、异常响应，进入更新逻辑
         } catch (e: Throwable) {
             if (chain.call().isCanceled()) throw e
         }
 
-        // 关闭无效响应，释放连接
         response?.close()
 
         val now = System.currentTimeMillis()
-        // 冷却判断，避免频繁拉取远程域名
         if (now - lastUpdateTime > UPDATE_COOLDOWN_MS) {
             if (tryUpdateUrl(chain)) {
                 throw IOException("网址列表已自动更新，请重启扩展/应用生效")
             }
         }
 
-        // 更新失败，抛出原始异常
         throw IOException("当前域名无法访问")
     }
 
