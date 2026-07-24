@@ -1,7 +1,10 @@
-name: Build WNACG Only
+name: Build & Publish WNACG Extension
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'src/zh/wnacg/**'
+      - '.github/workflows/blank.yml'
   workflow_dispatch:
 
 jobs:
@@ -20,12 +23,36 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # 仅编译 wnacg 单个扩展
-      - name: Build single extension wnacg
-        run: ./gradlew :src:zh:wnacg:assemble
+      # 强制清理缓存 + 编译
+      - name: Build extension
+        run: ./gradlew :src:zh:wnacg:clean :src:zh:wnacg:assemble --info
 
-      # 上传产物jar
-      - name: Upload built extension jar
+      # 上传临时构件（可选，Actions Artifact备份）
+      - name: Upload temp jar
         uses: actions/upload-artifact@v4
         with:
           path: src/zh/wnacg/build/outputs/ext/*.ext.kotlin.jar
+
+      # 获取版本号（自动读取build.gradle.kts内versionCode）
+      - name: Extract versionCode
+        id: get_version
+        run: |
+          VERSION=$(grep "versionCode =" src/zh/wnacg/build.gradle.kts | awk '{print $3}')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 发布到Github Release
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wnacg-v${{ env.VERSION }}
+          name: WNACG v${{ env.VERSION }}
+          body: |
+            自动构建发布
+            源码分支: main
+            版本号: ${{ env.VERSION }}
+          files: src/zh/wnacg/build/outputs/ext/*.ext.kotlin.jar
+          # 设为false：tag存在则更新Release；true=只创建不覆盖
+          append_body: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
