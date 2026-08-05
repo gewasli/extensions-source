@@ -1,5 +1,4 @@
 package eu.kanade.tachiyomi.extension.zh.wnacg
-
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -14,32 +13,40 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferences
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Element
 import rx.Observable
+import java.util.concurrent.TimeUnit
 
 @Source
 abstract class WNACG :
     HttpSource(),
     ConfigurableSource {
-
     override val supportsLatest = true
-
     private val preferences = getPreferences { preferenceMigration() }
-
     override val baseUrl = when (System.getenv("CI")) {
         "true" -> getCiBaseUrl()
         else -> preferences.baseUrl
     }
-
     private val updateUrlInterceptor = UpdateUrlInterceptor(preferences)
 
-    override val client = network.client.newBuilder()
-        .addInterceptor(updateUrlInterceptor)
-        .build()
+    // ========== 此处为修改后的 OkHttp 并发配置 ==========
+    override val client = run {
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 128
+            maxRequestsPerHost = 16
+        }
+        network.client.newBuilder()
+            .dispatcher(dispatcher)
+            .addInterceptor(updateUrlInterceptor)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
 
     override fun headersBuilder() = Headers.Builder()
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0")
