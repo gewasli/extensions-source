@@ -1,0 +1,664 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+ROOT_PATH=""
+TIMEOUT_SEC=20
+EXCLUDE_RAW="${EXCLUDE:-}"
+PROXY_HOST="${PROXY_HOST:-}"
+PROXY_PORT="${PROXY_PORT:-}"
+PROXY_USER="${PROXY_USER:-}"
+PROXY_PASS="${PROXY_PASS:-}"
+# 替换为国内可访问检测地址
+PROXY_PRECHECK_URL="https://www.baidu.com/"
+PROXY_PRECHECK_RETRIES=5
+# 新增代理开关标识
+USE_PROXY=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --root-path)
+            ROOT_PATH="${2:-}"
+            shift 2
+            ;;
+        --timeout-sec)
+            TIMEOUT_SEC="${2:-20}"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--root-path <path>] [--timeout-sec <seconds>]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "$ROOT_PATH" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    ROOT_PATH="$SCRIPT_DIR"
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Error: curl is required." >&2
+    exit 1
+fi
+
+if ! command -v perl >/dev/null 2>&1; then
+    echo "Error: perl is required." >&2
+    exit 1
+fi
+
+if ! [[ "$TIMEOUT_SEC" =~ ^[0-9]+$ ]]; then
+    echo "Error: --timeout-sec must be an integer." >&2
+    exit 1
+fi
+
+# ========== 核心修改1：移除强制代理校验，自动判断是否启用代理 ==========
+CURL_PROXY_ARGS=()
+if [[ -n "$PROXY_HOST" && -n "$PROXY_PORT" && -n "$PROXY_USER" && -n "$PROXY_PASS" ]]; then
+    USE_PROXY=1
+    CURL_PROXY_URL="socks5h://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}"
+    CURL_PROXY_ARGS=(--proxy "$CURL_PROXY_URL")
+    echo "Detected full proxy config, will use socks5 proxy"
+else
+    echo "Proxy variables incomplete or empty, running without proxy"
+fi
+
+RESOLVED_ROOT="$(cd "$ROOT_PATH" && pwd)"
+LOG_PATH="$RESOLVED_ROOT/logs.txt"
+LEGACY_PR_SUMMARY_PATH="$RESOLVED_ROOT/pr-summary.md"
+
+if [[ -f "$LEGACY_PR_SUMMARY_PATH" ]]; then
+    rm -f "$LEGACY_PR_SUMMARY_PATH"
+fi
+
+timestamp="$(date '+%Y-%m-%d %H:%M:%S %z')"
+
+# Colors (disabled when not a terminal or NO_COLOR is set)
+if [[ -z "${NO_COLOR:-}" ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    CYAN=$'\033[0;36m'
+    GRAY=$'\033[0;90m'
+    RESET=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' GRAY='' RESET=''
+fi
+
+# ========== 核心修改2：代理检测函数增加开关，无代理时直接跳过检测 ==========
+check_proxy_connection() {
+    if [[ $USE_PROXY -eq 0 ]]; then
+        echo "Skip proxy pre-check (no proxy configured)"
+        return 0
+    fi
+    local attempt=1
+    local stderr_file http_code
+
+    while [[ $attempt -le $PROXY_PRECHECK_RETRIES ]]; do
+        stderr_file="$(mktemp)"
+        http_code="$(curl -sS -L "${CURL_PROXY_ARGS[@]}" --max-redirs 5 \
+            --connect-timeout "$TIMEOUT_SEC" --max-time "$((TIMEOUT_SEC * 2))" \
+            -o /dev/null -w '%{http_code}' "$PROXY_PRECHECK_URL" 2>"$stderr_file")"
+        if [[ $? -eq 0 && "$http_code" != "000" ]]; then
+            rm -f "$stderr_file"
+            echo "Proxy pre-check passed on attempt $attempt ($PROXY_PRECHECK_URL, HTTP $http_code)"
+            return 0
+        fi
+
+        local err_msg
+        err_msg="$(<"$stderr_file")"
+        rm -f "$stderr_file"
+        echo "Proxy pre-check failed (attempt $attempt/$PROXY_PRECHECK_RETRIES): ${err_msg:-HTTP $http_code}" >&2
+        attempt=$((attempt + 1))
+    done
+
+    echo "Proxy pre-check failed after $PROXY_PRECHECK_RETRIES attempts. Cancel task." >&2
+    return 1
+}
+
+url_base() {
+    local url="$1"
+    if [[ "$url" =~ ^([a-zA-Z][a-zA-Z0-9+.-]*)://([^/?#]+) ]]; then
+        printf '%s://%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    fi
+}
+
+url_path_query() {
+    local url="$1"
+    local pathq=""
+    if [[ "$url" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+(.*)$ ]]; then
+        pathq="${BASH_REMATCH[1]}"
+    fi
+    pathq="${pathq%%#*}"
+    if [[ -z "$pathq" ]]; then
+        printf '/'
+        return 0
+    fi
+    if [[ "$pathq" == \?* ]]; then
+        printf '/%s' "$pathq"
+        return 0
+    fi
+    printf '%s' "$pathq"
+}
+
+host_from_url() {
+    local url="$1"
+    local auth host
+    if [[ "$url" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#]+) ]]; then
+        auth="${BASH_REMATCH[1]}"
+        auth="${auth##*@}"
+        host="${auth%%:*}"
+        host="${host#[}"
+        host="${host%]}"
+        printf '%s' "$host"
+    fi
+}
+
+escape_perl_re() {
+    perl -e '$s=shift; $s=quotemeta($s); print $s;' "$1"
+}
+
+REDIRECT_SUCCESS=0
+REDIRECT_ERROR=""
+REDIRECT_OLD_BASE=""
+REDIRECT_NEW_BASE=""
+REDIRECT_OLD_URL=""
+REDIRECT_FINAL_URL=""
+REDIRECT_REDIRECTED=0
+
+resolve_redirect_info() {
+    local old_url="$1"
+    local timeout="$2"
+
+    REDIRECT_SUCCESS=0
+    REDIRECT_ERROR=""
+    REDIRECT_OLD_BASE=""
+    REDIRECT_NEW_BASE=""
+    REDIRECT_OLD_URL="$old_url"
+    REDIRECT_FINAL_URL=""
+    REDIRECT_REDIRECTED=0
+
+    if [[ ! "$old_url" =~ ^https?:// ]]; then
+        REDIRECT_ERROR="Invalid URL: $old_url"
+        return 1
+    fi
+
+    local stderr_file
+    stderr_file="$(mktemp)"
+    local final_url
+    final_url="$(curl -sS -L "${CURL_PROXY_ARGS[@]}" --max-redirs 10 --connect-timeout "$timeout" --max-time "$((timeout * 3))" -o /dev/null -w '%{url_effective}' "$old_url" 2>"$stderr_file")"
+    local rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        REDIRECT_ERROR="$(<"$stderr_file")"
+        rm -f "$stderr_file"
+        return 1
+    fi
+    rm -f "$stderr_file"
+
+    if [[ -z "$final_url" ]]; then
+        final_url="$old_url"
+    fi
+
+    REDIRECT_OLD_BASE="$(url_base "$old_url")"
+    REDIRECT_NEW_BASE="$(url_base "$final_url")"
+    REDIRECT_FINAL_URL="$final_url"
+    if [[ "$REDIRECT_OLD_BASE" != "$REDIRECT_NEW_BASE" ]]; then
+        REDIRECT_REDIRECTED=1
+    else
+        REDIRECT_REDIRECTED=0
+    fi
+    REDIRECT_SUCCESS=1
+    return 0
+}
+
+get_new_url_value() {
+    local old_url="$1"
+    local final_url="$2"
+    local new_base pathq
+    new_base="$(url_base "$final_url")"
+    pathq="$(url_path_query "$old_url")"
+    if [[ -z "$pathq" || "$pathq" == "/" ]]; then
+        printf '%s' "$new_base"
+        return 0
+    fi
+    printf '%s%s' "${new_base%/}" "$pathq"
+}
+
+update_build_gradle_url() {
+    local file_path="$1"
+    local old_url="$2"
+    local new_url="$3"
+    [[ -f "$file_path" ]] || return 1
+
+    local escaped_old
+    escaped_old="$(escape_perl_re "$old_url")"
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+    if ! OLD_ESCAPED="$escaped_old" NEW_URL="$new_url" perl -0777 -pe 's/$ENV{OLD_ESCAPED}/$ENV{NEW_URL}/g' "$file_path" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if cmp -s "$file_path" "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    cat "$tmp_file" > "$file_path"
+    rm -f "$tmp_file"
+    return 0
+}
+
+update_deeplink_host() {
+    local file_path="$1"
+    local old_host="$2"
+    local new_host="$3"
+    [[ -f "$file_path" ]] || return 1
+
+    if ! grep -q "host(\"$old_host\")" "$file_path"; then
+        return 1
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+    if ! OLD_HOST="$old_host" NEW_HOST="$new_host" perl -0777 -pe 's/host\("\Q$ENV{OLD_HOST}\E"\)/host("$ENV{NEW_HOST}")/g' "$file_path" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if cmp -s "$file_path" "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    cat "$tmp_file" > "$file_path"
+    rm -f "$tmp_file"
+    return 0
+}
+
+VERSION_UPDATED=0
+VERSION_FOUND=0
+VERSION_MODE=""
+VERSION_OLD=""
+VERSION_NEW=""
+
+update_version_code() {
+    local file_path="$1"
+
+    VERSION_UPDATED=0
+    VERSION_FOUND=0
+    VERSION_MODE="no-build-file"
+    VERSION_OLD=""
+    VERSION_NEW=""
+
+    [[ -f "$file_path" ]] || return 0
+
+    local old_value new_value
+
+    # versionCode = 29
+    old_value="$(perl -ne 'if (/^\s*versionCode\s*=\s*(\d+)/) { print $1; exit }' "$file_path")"
+    if [[ -n "$old_value" ]]; then
+        new_value=$((old_value + 1))
+        VERSION_FOUND=1
+        VERSION_MODE="versionCode"
+        VERSION_OLD="$old_value"
+        VERSION_NEW="$new_value"
+
+        local tmp_file
+        tmp_file="$(mktemp)"
+        if ! NEW_NUM="$new_value" perl -0777 -pe 's{(?m)^(\s*versionCode\s*=\s*)\d+(\s*(?://.*)?$)}{$1.$ENV{NEW_NUM}.$2}e' "$file_path" > "$tmp_file"; then
+            rm -f "$tmp_file"
+            return 0
+        fi
+
+        if ! cmp -s "$file_path" "$tmp_file"; then
+            cat "$tmp_file" > "$file_path"
+            VERSION_UPDATED=1
+        fi
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    VERSION_FOUND=0
+    VERSION_MODE="not-found"
+    return 0
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        if [[ "$item" == "$needle" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+trim_text() {
+    local s="${1:-}"
+    s="${s//$'\r'/}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+single_line_text() {
+    local s="${1:-}"
+    s="${s//$'\r'/ }"
+    s="${s//$'\n'/ }"
+    s="${s//$'\t'/ }"
+    printf '%s' "$s"
+}
+
+append_file_line() {
+    local file_path="$1"
+    local text="$2"
+    printf '%s\n' "$text" >> "$file_path"
+}
+
+process_source() {
+    local source_name="$1"
+    local detail_file="$2"
+    local changed_file="$3"
+    local console_file="$4"
+
+    local source_dir="$RESOLVED_ROOT/$source_name"
+    local build_file="$source_dir/build.gradle.kts"
+
+    if [[ ! -f "$build_file" ]]; then
+        append_file_line "$detail_file" "[SKIP] $source_name | No build.gradle.kts found"
+        append_file_line "$console_file" "${GRAY}${source_name} — no build.gradle.kts${RESET}"
+        return 0
+    fi
+
+    local build_content
+    build_content="$(cat "$build_file" 2>/dev/null || true)"
+
+    # Extract ALL baseUrls from build.gradle.kts (handles baseUrl = "...", baseUrl("..."), and custom("...") in baseUrl { } blocks)
+    local -a old_urls=()
+    while IFS= read -r u; do
+        [[ -n "$u" ]] && old_urls+=("$u")
+    done < <({
+        # Pattern 1: baseUrl = "..." or baseUrl("...")
+        printf '%s\n' "$build_content" | grep -oP 'baseUrl\s*[=(]\s*"\Khttps?://[^"]+' || true
+        # Pattern 2: custom("...") inside baseUrl { } blocks
+        printf '%s\n' "$build_content" | grep -oP 'custom\("\Khttps?://[^"]+' || true
+    } | sort -u)
+
+    if [[ ${#old_urls[@]} -eq 0 ]]; then
+        append_file_line "$detail_file" "[SKIP] $source_name | No baseUrl found in build.gradle.kts"
+        append_file_line "$console_file" "${GRAY}${source_name} — no baseUrl found${RESET}"
+        return 0
+    fi
+
+    # Deduplicate URLs (multi-source may repeat the same domain)
+    local -A seen_urls=()
+    local -a unique_urls=()
+    local u
+    for u in "${old_urls[@]}"; do
+        if [[ -z "${seen_urls[$u]:-}" ]]; then
+            seen_urls["$u"]=1
+            unique_urls+=("$u")
+        fi
+    done
+
+    local -a changed_files=()
+    local build_basename="build.gradle.kts"
+    local any_changed=0
+    local any_redirect=0
+    local -a new_domain_list=()
+
+    for old_url in "${unique_urls[@]}"; do
+        if ! resolve_redirect_info "$old_url" "$TIMEOUT_SEC"; then
+            local redirect_error
+            redirect_error="$(single_line_text "$REDIRECT_ERROR")"
+            append_file_line "$detail_file" "[ERROR] $source_name | connect failed for $old_url | $redirect_error"
+            append_file_line "$console_file" "${RED}${source_name} — error: ${redirect_error}${RESET}"
+            continue
+        fi
+
+        if [[ "$REDIRECT_REDIRECTED" -ne 1 ]]; then
+            append_file_line "$detail_file" "[NO-REDIRECT] $source_name | $old_url"
+            append_file_line "$console_file" "${YELLOW}${source_name} — no new domain${RESET}"
+            continue
+        fi
+
+        any_redirect=1
+
+        local new_url
+        new_url="$(get_new_url_value "$old_url" "$REDIRECT_FINAL_URL")"
+
+        if update_build_gradle_url "$build_file" "$old_url" "$new_url"; then
+            any_changed=1
+            if ! array_contains "$build_basename" "${changed_files[@]}"; then
+                changed_files+=("$build_basename")
+            fi
+            new_domain_list+=("$(host_from_url "$new_url")")
+            printf '%s\t%s\t%s\n' "$source_name" "$old_url" "$new_url" >> "$changed_file"
+        fi
+
+        # Update deeplink host to match the new baseurl
+        local old_host new_host
+        old_host="$(host_from_url "$old_url")"
+        new_host="$(host_from_url "$new_url")"
+        if [[ "$old_host" != "$new_host" ]]; then
+            update_deeplink_host "$build_file" "$old_host" "$new_host"
+        fi
+    done
+
+    if [[ "$any_changed" -eq 1 ]]; then
+        update_version_code "$build_file"
+        if [[ "$VERSION_UPDATED" -eq 1 ]]; then
+            if ! array_contains "$build_basename" "${changed_files[@]}"; then
+                changed_files+=("$build_basename")
+            fi
+            append_file_line "$detail_file" "[VERSION] $source_name | $VERSION_MODE: $VERSION_OLD => $VERSION_NEW"
+        elif [[ "$VERSION_MODE" == "not-found" ]]; then
+            append_file_line "$detail_file" "[VERSION-WARN] $source_name | build.gradle.kts has no versionCode to update"
+        fi
+
+        local new_hosts
+        new_hosts="$(IFS=', '; echo "${new_domain_list[*]}")"
+        append_file_line "$detail_file" "[CHANGED] $source_name | files: $(IFS=', '; echo "${changed_files[*]}")"
+        append_file_line "$console_file" "${GREEN}${source_name} → ${new_hosts}${RESET}"
+    else
+        if [[ "$any_redirect" -eq 1 ]]; then
+            append_file_line "$detail_file" "[SKIP] $source_name | redirected but no matching value found to update"
+            append_file_line "$console_file" "${YELLOW}${source_name} — redirect detected but no file updated${RESET}"
+        else
+            append_file_line "$detail_file" "[SKIP] $source_name | no domain redirect detected"
+            # no console line — already logged per-URL above
+        fi
+    fi
+}
+
+wait_for_available_slot() {
+    local max_jobs="$1"
+    while true; do
+        reap_finished_jobs
+        if [[ ${#running_pids[@]} -lt "$max_jobs" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+}
+
+reap_finished_jobs() {
+    local -a remaining_pids=()
+    local pid
+    for pid in "${running_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            remaining_pids+=("$pid")
+        else
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    running_pids=("${remaining_pids[@]}")
+}
+
+wait_for_all_running_jobs() {
+    local pid
+    for pid in "${running_pids[@]}"; do
+        wait "$pid" || true
+    done
+    running_pids=()
+}
+
+declare -a sources
+mapfile -t sources < <(find "$RESOLVED_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+
+declare -a detail_lines
+declare -a changed_entries
+declare -a console_lines
+declare -A excluded_sources
+
+if [[ -n "$EXCLUDE_RAW" ]]; then
+    while IFS= read -r raw_line; do
+        exclude_name="$(trim_text "$raw_line")"
+        if [[ -n "$exclude_name" ]]; then
+            excluded_sources["$exclude_name"]=1
+        fi
+    done <<< "$EXCLUDE_RAW"
+fi
+
+# 代理检测现在会自动跳过无代理场景
+if ! check_proxy_connection; then
+    exit 1
+fi
+
+echo "Found ${#sources[@]} sources in $RESOLVED_ROOT"
+MAX_PARALLEL_JOBS="${MAX_PARALLEL_JOBS:-${#sources[@]}}"
+if ! [[ "$MAX_PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "WARN: MAX_PARALLEL_JOBS is invalid ($MAX_PARALLEL_JOBS), fallback to 16"
+    MAX_PARALLEL_JOBS=16
+fi
+echo "Running source checks in parallel (max jobs: $MAX_PARALLEL_JOBS)"
+
+WORK_DIR="$(mktemp -d)"
+cleanup_work_dir() {
+    rm -rf "$WORK_DIR"
+}
+trap cleanup_work_dir EXIT
+
+declare -a job_sources
+declare -a job_detail_files
+declare -a job_changed_files
+declare -a job_console_files
+declare -a running_pids
+job_index=0
+
+for source_name in "${sources[@]}"; do
+    if [[ -n "${excluded_sources[$source_name]:-}" ]]; then
+        detail_lines+=("[SKIP-EXCLUDED] $source_name | Listed in EXCLUDE input")
+        console_lines+=("${GRAY}${source_name} — excluded${RESET}")
+        continue
+    fi
+
+    wait_for_available_slot "$MAX_PARALLEL_JOBS"
+
+    detail_file="$WORK_DIR/$job_index.detail"
+    changed_file="$WORK_DIR/$job_index.changed"
+    console_file="$WORK_DIR/$job_index.console"
+    : > "$detail_file"
+    : > "$changed_file"
+    : > "$console_file"
+
+    process_source "$source_name" "$detail_file" "$changed_file" "$console_file" &
+    pid="$!"
+    job_sources+=("$source_name")
+    running_pids+=("$pid")
+    job_detail_files+=("$detail_file")
+    job_changed_files+=("$changed_file")
+    job_console_files+=("$console_file")
+    job_index=$((job_index + 1))
+done
+
+wait_for_all_running_jobs
+
+for i in "${!job_sources[@]}"; do
+    if [[ -s "${job_detail_files[$i]}" ]]; then
+        while IFS= read -r line; do
+            detail_lines+=("$line")
+        done < "${job_detail_files[$i]}"
+    fi
+
+    if [[ -s "${job_changed_files[$i]}" ]]; then
+        while IFS= read -r line; do
+            changed_entries+=("$line")
+        done < "${job_changed_files[$i]}"
+    fi
+
+    if [[ -s "${job_console_files[$i]}" ]]; then
+        while IFS= read -r line; do
+            console_lines+=("$line")
+        done < "${job_console_files[$i]}"
+    fi
+done
+
+if [[ ${#console_lines[@]} -gt 0 ]]; then
+    # Sort: changed (green) first, then errors/redirects (yellow/red), then skips (gray)
+    declare -a sorted_changed=() sorted_other=()
+    for line in "${console_lines[@]}"; do
+        if [[ "$line" == *"$GREEN"* ]]; then
+            sorted_changed+=("$line")
+        else
+            sorted_other+=("$line")
+        fi
+    done
+    if [[ ${#sorted_changed[@]} -gt 0 ]]; then
+        printf '%s\n' "${sorted_changed[@]}" | sort
+    fi
+    if [[ ${#sorted_changed[@]} -gt 0 && ${#sorted_other[@]} -gt 0 ]]; then
+        echo ""
+    fi
+    if [[ ${#sorted_other[@]} -gt 0 ]]; then
+        printf '%s\n' "${sorted_other[@]}" | sort
+    fi
+fi
+
+{
+    echo "Domain Update Summary"
+    echo "Run at: $timestamp"
+    echo "Root: $RESOLVED_ROOT"
+    echo "Sources found: ${#sources[@]}"
+    echo
+    echo "## Changed Domains"
+    if [[ ${#changed_entries[@]} -eq 0 ]]; then
+        echo "- No redirected domains were changed."
+    else
+        while IFS=$'\t' read -r src old_url new_url; do
+            old_host="$(host_from_url "$old_url")"
+            new_host="$(host_from_url "$new_url")"
+            echo "- **$src**: \`$old_host\` => \`$new_host\`"
+        done < <(printf '%s\n' "${changed_entries[@]}" | sort -t $'\t' -k1,1)
+    fi
+
+    echo
+    echo "Checklist:"
+    echo
+    echo "- [x] Updated \`versionCode\` value in \`build.gradle.kts\`"
+    echo "- [x] Updated \`baseVersionCode\` in \`build.gradle.kts\` (if updated multisrc theme code)"
+    echo "- [ ] Referenced all related issues in the PR body (e.g. \"Closes #xyz\")"
+    echo "- [ ] Set the \`contentWarning\` configuration in \`build.gradle.kts\` appropriately"
+    echo "- [x] Have not changed source names"
+    echo "- [x] Have explicitly kept the \`id\` if a source's name or language were changed"
+    echo "- [x] Have tested the modifications by compiling and running the extension through Android Studio"
+    echo "- [ ] Have removed \`web_hi_res_512.png\` when adding a new extension"
+    echo "- [ ] This PR is AI-assisted, I have reviewed the changes manually and confirmed they are not slop"
+    echo
+    echo "## Details"
+    if [[ ${#detail_lines[@]} -eq 0 ]]; then
+        echo "- No detail entries."
+    else
+        printf '%s\n' "${detail_lines[@]}"
+    fi
+} >"$LOG_PATH"
+
+echo
+echo "Done. Log written to: $LOG_PATH"
