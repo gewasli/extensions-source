@@ -1,4 +1,4 @@
-name: CI01
+name: CI02
 permissions:
   contents: write
 
@@ -42,15 +42,20 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew | true
-          # 仅编译 src/wnacg 单个模块
-          ./gradlew -p src/wnacg assembleRelease
+          # 打印目录用于校验
+          echo "=== src目录列表 ==="
+          ls -la ./src
+          echo "=== src/zh目录列表 ==="
+          ls -la ./src/zh
+          # 正确路径：src/zh/wnacg
+          ./gradlew -p src/zh/wnacg assembleRelease
       - name: Upload Wnacg build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: "individual-apks"
           path: |
-            src/wnacg/build/outputs/apk/release/*.apk
-            src/wnacg/build/outputs/jar/release/*.jar
+            src/zh/wnacg/build/outputs/apk/release/*.apk
+            src/zh/wnacg/build/outputs/jar/release/*.jar
             **/keiyoushi-source-info.json
           retention-days: 1
 
@@ -84,7 +89,7 @@ jobs:
           path: repo
           persist-credentials: true
 
-      # 修复之前 logs.txt 不存在导致的 Git exit code 128 报错
+      # 修复 logs.txt 不存在报错
       - name: Precreate log directory & empty log file
         run: |
           cd repo
