@@ -1,139 +1,111 @@
-name: Update ZH Domains
-
-on:
-  workflow_dispatch:
-
-# 精简最小权限，替代 write-all
+name: CI
 permissions:
   contents: write
 
+on: 
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release"
+        required: false
+        default: true
+        type: boolean
+
+env:
+  CI_CHUNK_SIZE: 65
+
 jobs:
-  update-zh-domains:
+  build_individual:
+    name: Build individual modules (Only Wnacg)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout official source repo
-        uses: actions/checkout@v4
+      - name: Checkout main branch
+        uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
         with:
-          repository: keiyoushi/extensions-source
+          java-version: 17
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Prepare signing key
+        run: |
+          echo ${{ secrets.SIGNING_KEY }} | base64 -d > signingkey.jks
+      - name: Build extensions (Only Wnacg Source)
+        env:
+          CI_CHUNK_NUM: 0
+          ALIAS: ${{ secrets.ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew | true
+          # 仅编译 src/wnacg 单个模块
+          ./gradlew -p src/wnacg assembleRelease
+      - name: Upload Wnacg build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: "individual-apks"
+          path: |
+            src/wnacg/build/outputs/apk/release/*.apk
+            src/wnacg/build/outputs/jar/release/*.jar
+            **/keiyoushi-source-info.json
+          retention-days: 1
+
+      - name: Clean up signing key
+        if: always()
+        run: rm -f $GITHUB_WORKSPACE/signingkey.jks
+
+  publish_repo:
+    name: Publish repo
+    if: ${{ inputs.release == true }}
+    needs:
+      - build_individual
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ~/apk-artifacts
+
+      - name: Checkout main branch
+        uses: actions/checkout@v7
+        with:
           ref: main
+          path: main
+          persist-credentials: false
+
+      - name: Checkout repo branch
+        uses: actions/checkout@v7
+        with:
+          ref: repo
           path: repo
-          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Checkout your fork (only update script)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: main
-          path: fork
-          fetch-depth: 1
-          sparse-checkout: |
-            .github/scripts/update-domains.sh
-
-      - name: Prepare update script
-        run: |
-          cp fork/.github/scripts/update-domains.sh repo/.github/scripts/update-domains.sh
-          chmod +x repo/.github/scripts/update-domains.sh
-
-      - name: Run domain update script
-        env:
-          EXCLUDE: ${{ vars.EXCLUDE }}
-          PROXY_HOST: ${{ secrets.PROXY_HOST }}
-          PROXY_PORT: ${{ secrets.PROXY_PORT }}
-          PROXY_USER: ${{ secrets.PROXY_USER }}
-          PROXY_PASS: ${{ secrets.PROXY_PASS }}
+      # 修复之前 logs.txt 不存在导致的 Git exit code 128 报错
+      - name: Precreate log directory & empty log file
         run: |
           cd repo
-          # 代理变量容错：空值则清空代理环境变量
-          if [[ -z "$PROXY_HOST" || -z "$PROXY_PORT" ]]; then
-            unset PROXY_HOST PROXY_PORT PROXY_USER PROXY_PASS
-            echo "Proxy secrets not set, running without proxy"
-          fi
-          ./.github/scripts/update-domains.sh --root-path ./src/zh --timeout-sec 20
-          # 导出日志到工作目录
-          [[ -f src/zh/logs.txt ]] && mv src/zh/logs.txt "${{ github.workspace }}/zh-update-logs.txt"
+          mkdir -p src/zh
+          touch src/zh/logs.txt
+          ls -la src/zh
 
-      - name: Print full logs
-        if: always()
-        run: |
-          if [[ -f "${{ github.workspace }}/zh-update-logs.txt" ]]; then
-            echo "================ ZH DOMAIN UPDATE LOGS ================"
-            cat "${{ github.workspace }}/zh-update-logs.txt"
-          else
-            echo "No logs generated (no domain changes or script error)"
-          fi
-
-      - name: Save logs as workflow artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zh-domain-update-logs
-          path: ${{ github.workspace }}/zh-update-logs.txt
-          retention-days: 7
-
-      - name: Commit & push changes to your fork
-        id: commit_push
+      - name: Publish and deploy repo
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DELETE: '["zh.copymangas"]'
         run: |
           cd repo
-          # 生成唯一临时分支名
-          BRANCH_NAME="domain-update-$(date -u +'%H%M%S-%d%m%Y')"
-          git checkout -b "$BRANCH_NAME"
-
-          # 配置提交者信息
-          git config user.name "${{ github.repository_owner }}"
-          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
-
-          git rm -f src/zh/logs.txt
-          git add src/zh
-
-          # 无变更直接退出
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No zh domain modifications detected, skip commit"
-            exit 0
-          fi
-
-          # 提取变更域名作为提交信息
-          COMMIT_TMP=$(mktemp)
-          FULL_COMMIT=$(mktemp)
-          if [[ -f "${{ github.workspace }}/zh-update-logs.txt" ]]; then
-            awk '
-              /^## Changed Domains/ { flag=1 }
-              /^## Details/ { flag=0 }
-              flag == 1 { print }
-            ' "${{ github.workspace }}/zh-update-logs.txt" > "$COMMIT_TMP"
-          fi
-
-          # 校验提交内容
-          if [[ ! -s "$COMMIT_TMP" ]]; then
-            echo "Update Chinese source domains" > "$COMMIT_TMP"
-          fi
-
-          # 拼接完整commit信息
-          echo "Auto update ZH source domains" > "$FULL_COMMIT"
-          echo "" >> "$FULL_COMMIT"
-          cat "$COMMIT_TMP" >> "$FULL_COMMIT"
-
-          git commit -F "$FULL_COMMIT"
-
-          # 推送至当前fork仓库
-          git remote rename origin upstream
-          git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git push fork "$BRANCH_NAME"
-
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Final Summary
-        if: always()
-        run: |
-          if [[ "${{ steps.commit_push.outputs.changed }}" == "true" ]]; then
-            echo "✅ Domain update completed, new branch pushed: ${{ steps.commit_push.outputs.branch_name }}"
+          pip install protobuf
+          python ../main/.github/scripts/publish-repo.py "$DELETE"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git status
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "Update extensions repo (only Wnacg)"
+            git push
           else
-            echo "ℹ️ No domain changes found, no new branch created"
+            echo "No changes to commit"
           fi
-
-      - name: Clean temp files
-        if: always()
-        run: rm -rf repo fork
