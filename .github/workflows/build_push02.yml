@@ -1,4 +1,4 @@
-name: CI1
+name: CI
 
 on:
   push:
@@ -61,50 +61,51 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: 17
           distribution: temurin
 
-      - name: Set up Gradle
+      - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
         with:
           cache-read-only: ${{ matrix.chunk.number > 1 }}
 
-      # 修复版签名密钥解码步骤（去除换行、固定根目录、赋权限）
-      - name: Prepare signing key
+      # ========== 自动生成调试密钥（核心，无需任何Secret） ==========
+      - name: Auto generate debug keystore
         run: |
-          echo "${{ secrets.SIGNING_KEY }}" | tr -d '\n' | base64 -d > $GITHUB_WORKSPACE/signingkey.jks
-          ls -lh $GITHUB_WORKSPACE/signingkey.jks
+          keytool -genkey -noprompt \
+            -keystore $GITHUB_WORKSPACE/signingkey.jks \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Debug,OU=Test,O=Test,L=City,S=State,C=CN"
           chmod 644 $GITHUB_WORKSPACE/signingkey.jks
+          ls -lh $GITHUB_WORKSPACE/signingkey.jks
 
-      # 调试步骤，报错时保留，正常后可删除
-      - name: Debug Sign Env
-        run: |
-          echo "密钥文件存在: $(test -f $GITHUB_WORKSPACE/signingkey.jks && echo OK || echo NO)"
-          echo "别名配置: ${{ secrets.ALIAS != '' }}"
-
-      - name: Build extensions (${{ matrix.chunk.number }})
+      # 编译，不再需要签名相关Secret环境变量
+      - name: Run Gradle Build
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          ./gradlew $MODULES
+        run: ./gradlew $MODULES --stacktrace
 
-      - name: Upload APKs (${{ matrix.chunk.number }})
+      # 上传已签名APK
+      - name: Upload Signed APK Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "individual-apks-${{ matrix.chunk.number }}"
+          name: "debug-signed-apks-${{ matrix.chunk.number }}"
           path: |
             **/build/outputs/apk/release/*.apk
             **/build/outputs/jar/release/*.jar
             **/build/keiyoushi-source-info.json
-          retention-days: 1
+          retention-days: 2
 
-      - name: Clean up CI files
+      # 清理密钥文件
+      - name: Clean Keystore
         if: always()
         run: rm -f $GITHUB_WORKSPACE/signingkey.jks
 
@@ -143,7 +144,7 @@ jobs:
           path: repo
           persist-credentials: true
 
-      - name: Publish and deploy repo
+      - name: Publish repo index
         env:
           DELETE: ${{ needs.prepare.outputs.delete }}
         run: |
@@ -152,7 +153,6 @@ jobs:
           python ../main/.github/scripts/publish-repo.py "$DELETE"
           git config --global user.email "156378334+keiyoushi-bot@users.noreply.github.com"
           git config --global user.name "keiyoushi-bot"
-          git status
           if [ -n "$(git status --porcelain)" ]; then
             git add .
             git commit -m "Update extensions repo"
@@ -161,5 +161,5 @@ jobs:
             curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.json
             curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.pb
           else
-            echo "No changes to commit"
+            echo "No repo changes to push"
           fi
