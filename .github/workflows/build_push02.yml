@@ -1,4 +1,4 @@
-name: CI
+name: CI1
 
 on:
   push:
@@ -12,7 +12,8 @@ on:
       - '.github/workflows/build_push.yml'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: write # 必须开启，用于创建Release上传文件
 
 concurrency:
   group: ${{ github.workflow }}
@@ -72,94 +73,47 @@ jobs:
         with:
           cache-read-only: ${{ matrix.chunk.number > 1 }}
 
-      # ========== 自动生成调试密钥（核心，无需任何Secret） ==========
-      - name: Auto generate debug keystore
-        run: |
-          keytool -genkey -noprompt \
-            -keystore $GITHUB_WORKSPACE/signingkey.jks \
-            -alias androiddebugkey \
-            -storepass android \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Debug,OU=Test,O=Test,L=City,S=State,C=CN"
-          chmod 644 $GITHUB_WORKSPACE/signingkey.jks
-          ls -lh $GITHUB_WORKSPACE/signingkey.jks
-
-      # 编译，不再需要签名相关Secret环境变量
       - name: Run Gradle Build
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
         run: ./gradlew $MODULES --stacktrace
 
-      # 上传已签名APK
-      - name: Upload Signed APK Artifacts
+      # 保存当前分块APK到公共目录，最后统一打包Release
+      - name: Collect APK files
+        run: |
+          mkdir -p ./output_apks
+          find . -path "*/build/outputs/apk/release/*.apk" -exec cp {} ./output_apks/ \;
+
+      - name: Upload Unsigned APK Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "debug-signed-apks-${{ matrix.chunk.number }}"
-          path: |
-            **/build/outputs/apk/release/*.apk
-            **/build/outputs/jar/release/*.jar
-            **/build/keiyoushi-source-info.json
+          name: "unsigned-apks-${{ matrix.chunk.number }}"
+          path: ./output_apks
           retention-days: 2
 
-      # 清理密钥文件
-      - name: Clean Keystore
-        if: always()
-        run: rm -f $GITHUB_WORKSPACE/signingkey.jks
-
-  publish:
-    name: Publish extension repo
-    needs: [prepare, build]
-    if: >-
-      always() &&
-      github.repository == 'keiyoushi/extensions-source' &&
-      needs.prepare.result == 'success' &&
-      needs.build.result != 'failure' &&
-      needs.build.result != 'cancelled' &&
-      needs.prepare.outputs.delete != '[]'
+# 汇总所有分块APK，打包压缩包，自动发布到仓库Release
+  release:
+    name: Create GitHub Release
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - name: Download APK artifacts
-        if: needs.build.result == 'success'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download all APK artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: ~/apk-artifacts
+          path: ./all_apks
 
-      - name: Checkout main branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          path: main
-          persist-credentials: false
-
-      - name: Checkout repo branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: keiyoushi/extensions
-          token: ${{ secrets.BOT_PAT }}
-          ref: repo
-          path: repo
-          persist-credentials: true
-
-      - name: Publish repo index
-        env:
-          DELETE: ${{ needs.prepare.outputs.delete }}
+      - name: Package all apks into zip
         run: |
-          cd repo
-          pip install protobuf
-          python ../main/.github/scripts/publish-repo.py "$DELETE"
-          git config --global user.email "156378334+keiyoushi-bot@users.noreply.github.com"
-          git config --global user.name "keiyoushi-bot"
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "Update extensions repo"
-            git push
-            curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json
-            curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.json
-            curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.pb
-          else
-            echo "No repo changes to push"
-          fi
+          mkdir release_package
+          find ./all_apks -name "*.apk" -exec cp {} release_package/ \;
+          zip -r all_extensions_unsigned.zip release_package
+
+      - name: Create Release & Upload ZIP
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: auto-build-$(date +%Y%m%d_%H%M)
+          name: Auto Build Unsigned APK $(date +%Y-%m-%d)
+          body: 自动编译未签名扩展APK，无密钥，如需安装请本地手动签名
+          files: all_extensions_unsigned.zip
+          draft: false
+          prerelease: true
