@@ -13,6 +13,6 @@ keiyoushi {
     source {
         name = "紳士漫畫"
         lang = "zh"
-        baseUrl = "https://www.wn07.cfd"
+        baseUrl = "https://www.wn09.cfd"
     }
 }
