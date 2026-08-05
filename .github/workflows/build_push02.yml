@@ -16,7 +16,7 @@ env:
 
 jobs:
   build_individual:
-    name: Build individual modules (Only Wnacg)
+    name: Build individual modules (Only src/zh)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main branch
@@ -34,7 +34,7 @@ jobs:
       - name: Prepare signing key
         run: |
           echo ${{ secrets.SIGNING_KEY }} | base64 -d > signingkey.jks
-      - name: Build extensions (Only Wnacg Source)
+      - name: Build extensions (Only src/zh all sources)
         env:
           CI_CHUNK_NUM: 0
           ALIAS: ${{ secrets.ALIAS }}
@@ -47,15 +47,15 @@ jobs:
           ls -la ./src
           echo "=== src/zh目录列表 ==="
           ls -la ./src/zh
-          # 正确路径：src/zh/wnacg
-          ./gradlew -p src/zh/wnacg assembleRelease
-      - name: Upload Wnacg build artifacts
+          # 编译整个src/zh目录下所有子模块
+          ./gradlew -p src/zh assembleRelease
+      - name: Upload zh build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: "individual-apks"
           path: |
-            src/zh/wnacg/build/outputs/apk/release/*.apk
-            src/zh/wnacg/build/outputs/jar/release/*.jar
+            src/zh/**/build/outputs/apk/release/*.apk
+            src/zh/**/build/outputs/jar/release/*.jar
             **/keiyoushi-source-info.json
           retention-days: 1
 
@@ -109,7 +109,7 @@ jobs:
           git status
           if [ -n "$(git status --porcelain)" ]; then
             git add .
-            git commit -m "Update extensions repo (only Wnacg)"
+            git commit -m "Update extensions repo (only src/zh)"
             git push
           else
             echo "No changes to commit"
