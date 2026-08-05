@@ -1,121 +1,139 @@
-name: CI2
+name: Update ZH Domains
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '**'
-      - '!**.md'
-      - '!.github/**'
-      - '.github/scripts/**'
-      - '.github/workflows/build_push.yml'
   workflow_dispatch:
 
+# 精简最小权限，替代 write-all
 permissions:
   contents: write
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
-env:
-  CI_CHUNK_SIZE: 80
-  IS_PR_CHECK: false
-
 jobs:
-  prepare:
-    name: Prepare job
+  update-zh-domains:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      matrix: ${{ steps.generate-matrices.outputs.matrix }}
-      delete: ${{ steps.generate-matrices.outputs.delete }}
     steps:
-      - name: Checkout main branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout official source repo
+        uses: actions/checkout@v4
         with:
+          repository: keiyoushi/extensions-source
+          ref: main
+          path: repo
           fetch-depth: 0
-          persist-credentials: false
 
-      - name: Get last successful CI commit
-        uses: nrwl/nx-set-shas@afb73a62d26e41464e9254689e1fd6122ee683c1 # v5.0.1
+      - name: Checkout your fork (only update script)
+        uses: actions/checkout@v4
         with:
-          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 # empty tree
+          repository: ${{ github.repository }}
+          ref: main
+          path: fork
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/update-domains.sh
 
-      - id: generate-matrices
-        name: Create output matrices
+      - name: Prepare update script
         run: |
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
+          cp fork/.github/scripts/update-domains.sh repo/.github/scripts/update-domains.sh
+          chmod +x repo/.github/scripts/update-domains.sh
 
-  build:
-    name: Build extensions (${{ matrix.chunk.number }})
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: ${{ toJson(fromJson(needs.prepare.outputs.matrix).chunk) != '[]' }}
-    strategy:
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    steps:
-      - name: Checkout main branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Java 17
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
-        with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Setup Gradle Cache
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-        with:
-          cache-read-only: ${{ matrix.chunk.number > 1 }}
-
-      # 核心修复参数：关闭混淆、关闭字节码优化、强制生成stackmap
-      - name: Run Gradle Build
+      - name: Run domain update script
         env:
-          MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-        run: ./gradlew $MODULES --stacktrace -PminifyEnabled=false -PshrinkResources=false -Pandroid.compileJava.options.compilerArgs="-g,-stackmap"
-
-      - name: Collect APK files
+          EXCLUDE: ${{ vars.EXCLUDE }}
+          PROXY_HOST: ${{ secrets.PROXY_HOST }}
+          PROXY_PORT: ${{ secrets.PROXY_PORT }}
+          PROXY_USER: ${{ secrets.PROXY_USER }}
+          PROXY_PASS: ${{ secrets.PROXY_PASS }}
         run: |
-          mkdir -p ./output_apks
-          find . -path "*/build/outputs/apk/release/*.apk" -exec cp {} ./output_apks/ \;
+          cd repo
+          # 代理变量容错：空值则清空代理环境变量
+          if [[ -z "$PROXY_HOST" || -z "$PROXY_PORT" ]]; then
+            unset PROXY_HOST PROXY_PORT PROXY_USER PROXY_PASS
+            echo "Proxy secrets not set, running without proxy"
+          fi
+          ./.github/scripts/update-domains.sh --root-path ./src/zh --timeout-sec 20
+          # 导出日志到工作目录
+          [[ -f src/zh/logs.txt ]] && mv src/zh/logs.txt "${{ github.workspace }}/zh-update-logs.txt"
 
-      - name: Upload APK Artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: "fixed-apks-${{ matrix.chunk.number }}"
-          path: ./output_apks
-          retention-days: 2
-
-  release:
-    name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all APK artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./all_apks
-
-      - name: Package all apks into zip
+      - name: Print full logs
+        if: always()
         run: |
-          mkdir release_package
-          find ./all_apks -name "*.apk" -exec cp {} release_package/ \;
-          zip -r all_extensions_fixed.zip release_package
+          if [[ -f "${{ github.workspace }}/zh-update-logs.txt" ]]; then
+            echo "================ ZH DOMAIN UPDATE LOGS ================"
+            cat "${{ github.workspace }}/zh-update-logs.txt"
+          else
+            echo "No logs generated (no domain changes or script error)"
+          fi
 
-      - name: Create Release & Upload ZIP
-        uses: softprops/action-gh-release@v1
+      - name: Save logs as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: fixed-stackmap-build-$(date +%Y%m%d_%H%M)
-          name: Fixed StackMap Build $(date +%Y-%m-%d)
-          body: |
-            修复：强制保留StackMap帧，兼容Suwayomi JDK17校验
-            构建参数：关闭R8混淆/资源压缩、开启完整调试栈信息
-            说明：未签名APK，仅用于Suwayomi服务端导入
-          files: all_extensions_fixed.zip
-          draft: false
-          prerelease: true
+          name: zh-domain-update-logs
+          path: ${{ github.workspace }}/zh-update-logs.txt
+          retention-days: 7
+
+      - name: Commit & push changes to your fork
+        id: commit_push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd repo
+          # 生成唯一临时分支名
+          BRANCH_NAME="domain-update-$(date -u +'%H%M%S-%d%m%Y')"
+          git checkout -b "$BRANCH_NAME"
+
+          # 配置提交者信息
+          git config user.name "${{ github.repository_owner }}"
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+
+          git rm -f src/zh/logs.txt
+          git add src/zh
+
+          # 无变更直接退出
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No zh domain modifications detected, skip commit"
+            exit 0
+          fi
+
+          # 提取变更域名作为提交信息
+          COMMIT_TMP=$(mktemp)
+          FULL_COMMIT=$(mktemp)
+          if [[ -f "${{ github.workspace }}/zh-update-logs.txt" ]]; then
+            awk '
+              /^## Changed Domains/ { flag=1 }
+              /^## Details/ { flag=0 }
+              flag == 1 { print }
+            ' "${{ github.workspace }}/zh-update-logs.txt" > "$COMMIT_TMP"
+          fi
+
+          # 校验提交内容
+          if [[ ! -s "$COMMIT_TMP" ]]; then
+            echo "Update Chinese source domains" > "$COMMIT_TMP"
+          fi
+
+          # 拼接完整commit信息
+          echo "Auto update ZH source domains" > "$FULL_COMMIT"
+          echo "" >> "$FULL_COMMIT"
+          cat "$COMMIT_TMP" >> "$FULL_COMMIT"
+
+          git commit -F "$FULL_COMMIT"
+
+          # 推送至当前fork仓库
+          git remote rename origin upstream
+          git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git push fork "$BRANCH_NAME"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Final Summary
+        if: always()
+        run: |
+          if [[ "${{ steps.commit_push.outputs.changed }}" == "true" ]]; then
+            echo "✅ Domain update completed, new branch pushed: ${{ steps.commit_push.outputs.branch_name }}"
+          else
+            echo "ℹ️ No domain changes found, no new branch created"
+          fi
+
+      - name: Clean temp files
+        if: always()
+        run: rm -rf repo fork
