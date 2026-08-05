@@ -1,4 +1,4 @@
-name: CI02
+name: CI2
 permissions:
   contents: write
 
@@ -31,15 +31,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
 
-      - name: Prepare signing key
-        run: |
-          echo ${{ secrets.SIGNING_KEY }} | base64 -d > signingkey.jks
+      # 【关键改动】删除所有 Prepare signing key 密钥生成步骤
       - name: Build extensions (Only src/zh all sources)
-        env:
-          CI_CHUNK_NUM: 0
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew | true
           # 打印目录用于校验
@@ -47,7 +40,7 @@ jobs:
           ls -la ./src
           echo "=== src/zh目录列表 ==="
           ls -la ./src/zh
-          # 编译整个src/zh目录下所有子模块
+          # 编译整个src/zh，项目自动使用内置调试签名
           ./gradlew -p src/zh assembleRelease
       - name: Upload zh build artifacts
         uses: actions/upload-artifact@v7
@@ -59,9 +52,7 @@ jobs:
             **/keiyoushi-source-info.json
           retention-days: 1
 
-      - name: Clean up signing key
-        if: always()
-        run: rm -f $GITHUB_WORKSPACE/signingkey.jks
+      # 【关键改动】删除密钥清理步骤，不再生成signingkey.jks
 
   publish_repo:
     name: Publish repo
