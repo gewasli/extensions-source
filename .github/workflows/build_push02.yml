@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 允许自动创建Release上传安装包
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -46,8 +46,7 @@ jobs:
       - id: generate-matrices
         name: Create output matrices
         run: |
-          # 关键改动：Release → Debug，自动带完整StackMap帧，解决VerifyError
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Debug
+          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
 
   build:
     name: Build extensions (${{ matrix.chunk.number }})
@@ -74,25 +73,24 @@ jobs:
         with:
           cache-read-only: ${{ matrix.chunk.number > 1 }}
 
+      # 核心修复参数：关闭混淆、关闭字节码优化、强制生成stackmap
       - name: Run Gradle Build
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-        run: ./gradlew $MODULES --stacktrace
+        run: ./gradlew $MODULES --stacktrace -PminifyEnabled=false -PshrinkResources=false -Pandroid.compileJava.options.compilerArgs="-g,-stackmap"
 
-      # 收集Debug APK
       - name: Collect APK files
         run: |
           mkdir -p ./output_apks
-          find . -path "*/build/outputs/apk/debug/*.apk" -exec cp {} ./output_apks/ \;
+          find . -path "*/build/outputs/apk/release/*.apk" -exec cp {} ./output_apks/ \;
 
-      - name: Upload Debug APK Artifacts
+      - name: Upload APK Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "debug-apks-${{ matrix.chunk.number }}"
+          name: "fixed-apks-${{ matrix.chunk.number }}"
           path: ./output_apks
           retention-days: 2
 
-  # 自动汇总全部扩展并发布到仓库Releases
   release:
     name: Create GitHub Release
     needs: build
@@ -107,17 +105,17 @@ jobs:
         run: |
           mkdir release_package
           find ./all_apks -name "*.apk" -exec cp {} release_package/ \;
-          zip -r all_extensions_debug.zip release_package
+          zip -r all_extensions_fixed.zip release_package
 
       - name: Create Release & Upload ZIP
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: auto-debug-build-$(date +%Y%m%d_%H%M)
-          name: Auto Debug Build $(date +%Y-%m-%d)
+          tag_name: fixed-stackmap-build-$(date +%Y%m%d_%H%M)
+          name: Fixed StackMap Build $(date +%Y-%m-%d)
           body: |
-            编译类型：Debug（自带完整StackMap，兼容Suwayomi/Tachidesk）
-            状态：未签名APK，可直接导入Suwayomi服务端
-            注意：无法直接安装到安卓手机，手机端使用需手动签名
-          files: all_extensions_debug.zip
+            修复：强制保留StackMap帧，兼容Suwayomi JDK17校验
+            构建参数：关闭R8混淆/资源压缩、开启完整调试栈信息
+            说明：未签名APK，仅用于Suwayomi服务端导入
+          files: all_extensions_fixed.zip
           draft: false
           prerelease: true
