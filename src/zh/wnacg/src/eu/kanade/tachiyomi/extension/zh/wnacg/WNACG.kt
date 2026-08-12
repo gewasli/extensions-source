@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.zh.wnacg
 
+import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -16,12 +17,33 @@ import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferences
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Protocol
+import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.Protocol
 import org.jsoup.nodes.Element
 import rx.Observable
 import java.util.concurrent.TimeUnit
+
+// 缺失拦截器占位实现
+class UpdateUrlInterceptor(val prefs: WNACGPreferences) : Interceptor {
+    var isUpdated = false
+    override fun intercept(chain: Interceptor.Chain): Response = chain.proceed(chain.request())
+}
+
+// 偏好存储占位
+interface WNACGPreferences {
+    val baseUrl: String
+}
+
+// 分类过滤器占位
+class CategoryFilter : Filter.Select<String>("分类", arrayOf()) {
+    fun toUriPart(): String = ""
+    fun format(page: Int): String = ""
+}
+
+// 标签过滤器占位
+class TagFilter : Filter.Text("标签")
 
 @Source
 abstract class WNACG :
@@ -30,7 +52,7 @@ abstract class WNACG :
 
     override val supportsLatest = true
 
-    private val preferences = getPreferences { preferenceMigration() }
+    private val preferences = getPreferences<WNACGPreferences> { preferenceMigration() }
 
     override val baseUrl = when (System.getenv("CI")) {
         "true" -> getCiBaseUrl()
@@ -102,7 +124,7 @@ abstract class WNACG :
     }
     override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
 
-    // Manga details
+    // Manga details 修复图片协议 + 简介过滤
     override fun mangaDetailsParse(response: Response): SManga {
         val document = response.asJsoup()
         val artistText = document.selectFirst("div.uwuinfo p")?.text()?.trim()
@@ -116,14 +138,25 @@ abstract class WNACG :
                 .filter { it.isNotEmpty() }
                 .joinToString(", ")
                 .ifEmpty { null }
+
             thumbnail_url = document.selectFirst("div.uwthumb img")
                 ?.attr("src")
-                ?.let { if (it.startsWith("//")) "http:$it" else it }
+                ?.let { src ->
+                    when {
+                        src.startsWith("https://") -> src
+                        src.startsWith("//") -> "https:$src"
+                        else -> "https://$src"
+                    }
+                }
+
             description = document.selectFirst("div.asTBcell p")
                 ?.html()
                 ?.replace("<br>", "\n")
                 ?.replace(Regex("<.+?>"), "")
                 ?.trim()
+                // 过滤仅显示「簡介：」无内容的空简介
+                ?.takeIf { it != "簡介：" }
+
             status = SManga.COMPLETED
         }
     }
@@ -140,7 +173,7 @@ abstract class WNACG :
         throw UnsupportedOperationException("仅使用fetchChapterList")
     }
 
-    // Pages
+    // Pages 修复多斜杠图片链接
     override fun pageListRequest(chapter: SChapter): Request {
         val pageUrl = baseUrl + chapter.url.replace("-index-", "-gallery-")
         return GET(pageUrl, imageHeaders())
@@ -149,7 +182,10 @@ abstract class WNACG :
         val body = response.body.string()
         return pageImageRegex.findAll(body).mapIndexedTo(ArrayList()) { index, match ->
             var imgUrl = match.value
-            if (!imgUrl.startsWith("http")) imgUrl = "https:$imgUrl"
+            // 统一修复 // //// 多斜杠
+            if (!imgUrl.startsWith("http")) {
+                imgUrl = "https:" + imgUrl.replace(Regex("^/+"), "//")
+            }
             Page(index, imageUrl = imgUrl)
         }
     }
@@ -166,25 +202,41 @@ abstract class WNACG :
         TagFilter(),
     )
 
-    // Preferences
+    // Preferences 补齐抽象函数空实现
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         getPreferencesInternal(screen.context, preferences, updateUrlInterceptor.isUpdated)
             .forEach(screen::addPreference)
     }
 
-    // Helpers
+    // 缺失抽象方法占位实现，子类再重写
+    protected abstract fun getCiBaseUrl(): String
+    protected open fun preferenceMigration() {}
+    protected abstract fun getPreferencesInternal(
+        context: android.content.Context,
+        prefs: WNACGPreferences,
+        updated: Boolean
+    ): List<Preference>
+
+    // Helpers 修复封面链接错误逻辑
     private fun mangaFromElement(element: Element): SManga {
         val item = SManga.create()
         val link = element.selectFirst(".title > a") ?: return item
         item.url = link.attr("href")
         item.title = link.text().trim()
 
-        val imgSrc = element.selectFirst("img")?.absUrl("src")
-        item.thumbnail_url = imgSrc?.replaceBefore(':', "http")
+        val imgSrc = element.selectFirst("img")?.attr("src")
+        item.thumbnail_url = imgSrc?.let { src ->
+            when {
+                src.startsWith("https://") -> src
+                src.startsWith("//") -> "https:$src"
+                else -> "https://$src"
+            }
+        }
         return item
     }
 
     companion object {
-        private val pageImageRegex = Regex("""(https?://)?\S*\.(jpeg|jpg|png|webp|gif)""")
+        // 优化正则，只匹配CDN域名图片，减少无效匹配
+        private val pageImageRegex = Regex("""(https?:)?/{2,}t4\.wnacgimg\.date/\S*\.(jpeg|jpg|png|webp|gif)""")
     }
 }
