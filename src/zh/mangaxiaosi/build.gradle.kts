@@ -12,6 +12,6 @@ keiyoushi {
 
     source {
         lang = "zh"
-        baseUrl = "https://www.jjmhw2.top"
+        baseUrl = "https://www.jjmhw7.top"
     }
 }
