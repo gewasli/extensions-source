@@ -6,8 +6,9 @@ plugins {
 
 keiyoushi {
     name = "ITSACG"
-    versionCode = 1
+    versionCode = 23
     contentWarning = ContentWarning.NSFW
+    libVersion = "1.0"
 
     source {
         name = "福利漫畫"
