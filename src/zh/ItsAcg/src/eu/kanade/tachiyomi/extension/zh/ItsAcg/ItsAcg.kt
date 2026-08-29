@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.setting.WebViewSetting
+import keiyoushi.annotation.Source
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
@@ -36,16 +37,13 @@ import java.util.regex.Pattern
 abstract class ItsAcg :
     HttpSource(),
     ConfigurableSource {
-    override val name = "福利漫畫"
-    override val baseUrl = "https://www.itsacgaa.online"
-    override val lang = "zh"
-    override val supportsLatest = true
-
     private val network: NetworkHelper by injectLazy()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", baseUrl)
         .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+    // ...后面全部业务函数保留
+
 
     // ------------------------------------------------------------------
     // 热门
