@@ -11,7 +11,7 @@ import eu.kanade.tachiyomi.source.model.FilterList
  *
  * 其余（排序/语言子分类）可在此继续扩展为 Triple / SelectFilter。
  */
-object ItsAcgFilters {
+object Filters {
 
     /** 顶级分类下拉 */
     class CategoryFilter : Filter.Select<String>(
