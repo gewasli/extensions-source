@@ -32,7 +32,8 @@ import java.util.regex.Pattern
  *   2) 阅读页图片不在静态 HTML，藏在 JS 变量 var pics=[...] 中，需正则提取；
  *   3) 使用WebView登录，Cookie自动同步到OkHttp。
  */
-class ItsAcg :
+@Source
+abstract class ItsAcg :
     HttpSource(),
     ConfigurableSource {
     override val name = "福利漫畫"
