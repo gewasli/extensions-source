@@ -8,7 +8,7 @@ keiyoushi {
     name = "ITSACG"
     versionCode = 1
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.6"
+    libVersion = "1.4"
 
     source {
         name = "福利漫畫"
