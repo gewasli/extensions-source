@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.source.model.FilterList
  * 其余（排序/语言子分类）可在此继续扩展为 Triple / SelectFilter。
  */
 object ItsAcgFilters {
-
     /** 顶级分类下拉 */
     class CategoryFilter : Filter.Select<String>(
         "分类",
@@ -54,6 +53,8 @@ object ItsAcgFilters {
 
     fun getFilterList(): FilterList = FilterList(
         CategoryFilter(),
-        SortFilter(),
+        SortFilter(), // ←重点：此处增加尾部逗号
     )
 }
+
+// 文件末尾保留一个空换行
