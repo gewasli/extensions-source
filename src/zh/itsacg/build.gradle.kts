@@ -1,0 +1,18 @@
+import io.github.keiyoushi.gradle.api.ContentWarning
+
+plugins {
+    alias(kei.plugins.extension)
+}
+
+keiyoushi {
+    name = "ITSACG"
+    versionCode = 23
+    contentWarning = ContentWarning.NSFW
+    libVersion = "1.0"
+
+    source {
+        name = "福利漫畫"
+        lang = "zh"
+        baseUrl = "https://www.itsacgaa.online/"
+    }
+}
