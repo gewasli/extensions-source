@@ -47,13 +47,11 @@ class ItsAcg : HttpSource(), ConfigurableSource {
     // ------------------------------------------------------------------
     // 热门
     // ------------------------------------------------------------------
-    override fun popularMangaRequest(page: Int): Request {
-        return GET(
-            "$baseUrl/plugin.php?id=jameson_manhua&c=index&a=ku" +
-                "&odfie=edittime&order=desc&page=$page",
-            headers,
-        )
-    }
+    override fun popularMangaRequest(page: Int): Request = GET(
+        "$baseUrl/plugin.php?id=jameson_manhua&c=index&a=ku" +
+            "&odfie=edittime&order=desc&page=$page",
+        headers,
+    )
 
     override fun popularMangaParse(response: Response): MangasPage {
         val doc = response.use { parseHtml(it) }
@@ -93,18 +91,14 @@ class ItsAcg : HttpSource(), ConfigurableSource {
         return GET(url, headers)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        return popularMangaParse(response)
-    }
+    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
 
     override fun getFilterList(): FilterList = ItsAcgFilters.getFilterList()
 
     // ------------------------------------------------------------------
     // 详情
     // ------------------------------------------------------------------
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        return GET(baseUrl + manga.url, headers)
-    }
+    override fun mangaDetailsRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
 
     override fun mangaDetailsParse(response: Response): SManga {
         val doc = response.use { parseHtml(it) }
@@ -123,9 +117,7 @@ class ItsAcg : HttpSource(), ConfigurableSource {
     // ------------------------------------------------------------------
     // 章节（全部单章节）
     // ------------------------------------------------------------------
-    override fun chapterListRequest(manga: SManga): Request {
-        return GET(baseUrl + manga.url, headers)
-    }
+    override fun chapterListRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val url = response.request.url.toString().removePrefix(baseUrl)
@@ -141,9 +133,7 @@ class ItsAcg : HttpSource(), ConfigurableSource {
     // ------------------------------------------------------------------
     // 图片页
     // ------------------------------------------------------------------
-    override fun pageListRequest(chapter: SChapter): Request {
-        return GET(baseUrl + chapter.url, headers)
-    }
+    override fun pageListRequest(chapter: SChapter): Request = GET(baseUrl + chapter.url, headers)
 
     override fun pageListParse(response: Response): List<Page> {
         val html = response.use { it.body?.string().orEmpty() }
@@ -206,3 +196,4 @@ class ItsAcg : HttpSource(), ConfigurableSource {
         }
     }
 }
+
