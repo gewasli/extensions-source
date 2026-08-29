@@ -16,7 +16,7 @@ env:
 
 jobs:
   build_individual:
-    name: Build individual modules (Only src/zh)
+    name: Build individual modules (Only src/zh/ItsAcg)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main branch
