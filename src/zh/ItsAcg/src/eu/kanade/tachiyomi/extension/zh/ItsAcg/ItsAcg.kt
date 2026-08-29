@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.zh.itsacg
 
+import eu.kanade.tachiyomi.extension.zh.itsacg.ItsAcgFilters
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.model.FilterList
