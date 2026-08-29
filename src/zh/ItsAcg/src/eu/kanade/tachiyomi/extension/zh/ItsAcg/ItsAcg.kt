@@ -1,5 +1,4 @@
 package eu.kanade.tachiyomi.extension.zh.itsacg
-
 import android.content.Context
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
@@ -12,13 +11,11 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.setting.WebViewSetting
-import keiyoushi.annotation.Source
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import uy.kohesive.injekt.injectLazy
 import java.util.regex.Pattern
-
 /**
  * ITsACG（福利漫畫）图源。
  *
@@ -33,17 +30,36 @@ import java.util.regex.Pattern
  *   2) 阅读页图片不在静态 HTML，藏在 JS 变量 var pics=[...] 中，需正则提取；
  *   3) 使用WebView登录，Cookie自动同步到OkHttp。
  */
-@Source
-abstract class ItsAcg :
+// lib1.4：删除 @Source，去掉 abstract
+class ItsAcg :
     HttpSource(),
     ConfigurableSource {
-    private val network: NetworkHelper by injectLazy()
+
+    // lib1.4 必须手动写这4个属性，gradle不会注入
+    override val name = "福利漫畫"
+    override val baseUrl = "https://填写你的站点域名"
+    override val lang = "zh"
+    override val supportsLatest = true
+
+    // 补上泛型，解决 Cannot infer type for T；变量名network和父类冲突，加override
+    override val network: NetworkHelper by injectLazy<NetworkHelper>()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", baseUrl)
-        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-    // ...后面全部业务函数保留
+        .add("User‑Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 
+    // setupPreferenceScreen 使用lib1.4双参数版本，WebViewSetting可以正常使用
+    override fun setupPreferenceScreen(screen: PreferenceScreen, context: Context) {
+        WebViewSetting(context).apply {
+            key = "webview_login"
+            title = "网页登录"
+            summary = "打开网页登录账号，Cookie会自动同步"
+            url = baseUrl
+            screen.addPreference(this)
+        }
+    }
+
+    // ...后面全部业务函数保留
     // ------------------------------------------------------------------
     // 热门
     // ------------------------------------------------------------------
@@ -52,6 +68,7 @@ abstract class ItsAcg :
             "&odfie=edittime&order=desc&page=$page",
         headers,
     )
+
 
     override fun popularMangaParse(response: Response): MangasPage {
         val doc = response.use { parseHtml(it) }
