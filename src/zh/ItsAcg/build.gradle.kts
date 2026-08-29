@@ -7,14 +7,12 @@ plugins {
 keiyoushi {
     name = "ITSACG"
     versionCode = 1
-    libVersion = "1.6"
     contentWarning = ContentWarning.NSFW
+    libVersion = "1.6"
 
     source {
         name = "福利漫畫"
         lang = "zh"
-        id = 123
         baseUrl = "https://www.itsacgaa.online/"
-        className = "ItsAcg"
     }
 }
